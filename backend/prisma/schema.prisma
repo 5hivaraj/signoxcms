@@ -1,0 +1,496 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "windows"]
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// ENUMS
+// ============================================
+
+enum Role {
+  SUPER_ADMIN
+  CLIENT_ADMIN
+  USER_ADMIN
+  STAFF
+}
+
+enum StaffRole {
+  DISPLAY_MANAGER
+  BROADCAST_MANAGER
+  CONTENT_MANAGER
+  CMS_VIEWER
+  POP_MANAGER
+}
+
+enum DisplayStatus {
+  ONLINE
+  OFFLINE
+  PAIRING
+  ERROR
+}
+
+enum MediaType {
+  IMAGE
+  VIDEO
+}
+
+enum WidgetType {
+  CLOCK
+  WEATHER
+  WEB
+  MEDIA
+  TEXT
+}
+
+enum Orientation {
+  LANDSCAPE
+  PORTRAIT
+}
+
+enum ResizeMode {
+  FIT   // Maintain aspect ratio, fit within screen
+  FILL  // Maintain aspect ratio, fill screen (crop)
+  STRETCH // Stretch to fill, may distort
+}
+
+enum ScheduleStatus {
+  ACTIVE
+  INACTIVE
+  EXPIRED
+}
+
+enum RepeatType {
+  ONCE
+  DAILY
+  WEEKLY
+  MONTHLY
+}
+
+// ============================================
+// USER & AUTHENTICATION MODELS
+// ============================================
+
+model User {
+  id        String     @id @default(auto()) @map("_id") @db.ObjectId
+  name      String?    // User's display name
+  email     String     @unique
+  password  String
+  role      Role
+  staffRole StaffRole? // Only for STAFF role users
+  isActive  Boolean    @default(true)
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  // Relations
+  // Client Admin relations
+  clientProfile ClientProfile? // One-to-one: Client Admin has one profile
+
+  // User Admin relations (managed by Client Admin)
+  managedByClientAdminId String? @db.ObjectId // Which Client Admin manages this User Admin
+  managedByClientAdmin   User?   @relation("ClientAdminToUserAdmins", fields: [managedByClientAdminId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  userAdmins             User[]  @relation("ClientAdminToUserAdmins") // Client Admin has many User Admins
+
+  // User Admin manages Displays
+  managedDisplays Display[] // User Admin manages many Displays
+
+  // User Admin creates Staff users
+  createdStaffUsers    User[]  @relation("UserAdminToStaff")
+  createdByUserAdminId String? @db.ObjectId
+  createdByUserAdmin   User?   @relation("UserAdminToStaff", fields: [createdByUserAdminId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  // Client Admin owns displays (for analytics)
+  clientDisplays Display[] @relation("ClientAdminDisplays")
+
+  // Media and content ownership
+  createdMedia     Media[]
+  createdPlaylists Playlist[]
+  createdLayouts   Layout[]
+  createdSchedules Schedule[]
+}
+
+model ClientProfile {
+  id            String @id @default(auto()) @map("_id") @db.ObjectId
+  clientAdminId String @unique @db.ObjectId // One-to-one with Client Admin User
+  clientId      String @unique // Human-readable client ID (e.g., "CL-001", "CL-ABC123")
+
+  // License and limits
+  maxDisplays   Int       @default(10)
+  maxUsers      Int       @default(5)
+  maxStorageMB  Int       @default(25) // Maximum storage in MB for all media (disk space limit)
+  
+  // Monthly usage limits (bandwidth/transfer quota)
+  maxMonthlyUsageMB    Int     @default(150) // Maximum uploads per month (6x storage by default)
+  monthlyUploadedBytes BigInt  @default(0) // Cumulative uploads this month
+  usageQuotaResetDate  DateTime @default(now()) // Last quota reset date
+  billingDayOfMonth    Int     @default(1) // Day of month to reset quota (1-28)
+  
+  licenseExpiry DateTime?
+  isActive      Boolean   @default(true)
+
+  // Metadata
+  companyName  String?
+  contactEmail String?
+  contactPhone String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  clientAdmin User @relation(fields: [clientAdminId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+// ============================================
+// DISPLAY MODELS
+// ============================================
+
+model Display {
+  id          String        @id @default(auto()) @map("_id") @db.ObjectId
+  name        String?
+  pairingCode String?       @unique // 6-digit unique pairing code
+  deviceToken String?       @unique
+  isPaired    Boolean       @default(false)
+  status      DisplayStatus @default(PAIRING)
+
+  // Metadata
+  tags        String[] // Array of tags for filtering/grouping
+  location    String?
+  orientation Orientation @default(LANDSCAPE)
+
+  // Heartbeat and status tracking
+  lastHeartbeat     DateTime? // Last heartbeat received
+  heartbeatInterval Int?      @default(30) // Seconds between heartbeats
+
+  // Timestamps
+  pairedAt   DateTime?
+  lastSeenAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  // Relations
+  // User Admin manages this display
+  managedByUserId String? @db.ObjectId
+  managedByUser   User?   @relation(fields: [managedByUserId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  // Playlist assignment
+  playlistId String?   @db.ObjectId
+  playlist   Playlist? @relation(fields: [playlistId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  // Layout assignment
+  layoutId String? @db.ObjectId
+  layout   Layout? @relation(fields: [layoutId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  // Active multi-zone layout assignment
+  activeLayoutId String? @db.ObjectId
+  activeLayout   Layout? @relation("ActiveLayout", fields: [activeLayoutId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  // Client Admin tracking (for analytics - displays belong to a client)
+  clientAdminId String? @db.ObjectId
+  clientAdmin   User?   @relation("ClientAdminDisplays", fields: [clientAdminId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  // Scheduling
+  schedules ScheduleDisplay[]
+}
+
+// ============================================
+// MEDIA & PLAYLIST MODELS
+// ============================================
+
+model Media {
+  id           String    @id @default(auto()) @map("_id") @db.ObjectId
+  name         String
+  originalName String?
+  filename     String?
+  type         MediaType
+  url          String // File path or URL (HLS for videos)
+  originalUrl  String? // Original MP4 URL for offline playback
+  duration     Int? // Duration in seconds (for videos)
+  fileSize     Int? // File size in bytes
+  mimeType     String? // MIME type (e.g., image/jpeg, video/mp4)
+  width        Int? // Image/video width
+  height       Int? // Image/video height
+
+  // Metadata
+  description String?
+  tags        String[]
+  endDate     DateTime? // Auto-delete date for media lifespan
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  createdById String? @db.ObjectId
+  createdBy   User?   @relation(fields: [createdById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  playlistItems      PlaylistItem[]
+  widgets            Widget[]
+  layoutSectionItems LayoutSectionItem[]
+}
+
+model Playlist {
+  id          String  @id @default(auto()) @map("_id") @db.ObjectId
+  name        String
+  description String?
+  isActive    Boolean @default(true)
+
+  // Playback settings
+  loopEnabled    Boolean @default(true)
+  shuffleEnabled Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  createdById String? @db.ObjectId
+  createdBy   User?   @relation(fields: [createdById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  items       PlaylistItem[]
+  displays    Display[]
+  zones       Zone[]         @relation("ZonePlaylist")
+  layoutZones LayoutZone[]   @relation("LayoutZonePlaylist")
+  schedules   Schedule[]
+}
+
+model PlaylistItem {
+  id         String       @id @default(auto()) @map("_id") @db.ObjectId
+  order      Int // Order in playlist
+  duration   Int? // Override duration for this item (seconds)
+  loopVideo  Boolean?     @default(false) // If true, video loops for duration then next item
+  orientation Orientation? // Preferred display orientation for this item
+  resizeMode  ResizeMode?  @default(FIT) // How to fit media: FIT, FILL, STRETCH
+  rotation   Int?         @default(0) // Display rotation in degrees: 0, 90, 180, 270
+
+  createdAt DateTime @default(now())
+
+  // Relations
+  playlistId String   @db.ObjectId
+  playlist   Playlist @relation(fields: [playlistId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  mediaId String @db.ObjectId
+  media   Media  @relation(fields: [mediaId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([playlistId, order])
+}
+
+// ============================================
+// LAYOUT & WIDGET MODELS
+// ============================================
+
+model Layout {
+  id          String  @id @default(auto()) @map("_id") @db.ObjectId
+  name        String
+  description String?
+  isActive    Boolean @default(true)
+
+  // Template-based layout support
+  templateId  String? // Template shape ID (e.g., 'split-2-horiz', 'l-shape-right')
+
+  // Layout dimensions
+  width       Int         @default(1920)
+  height      Int         @default(1080)
+  orientation Orientation @default(LANDSCAPE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  createdById String? @db.ObjectId
+  createdBy   User?   @relation(fields: [createdById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  widgets        Widget[]
+  sections       LayoutSection[]
+  displays       Display[]
+  zones          Zone[] // Multi-zone layout support
+  layoutZones    LayoutZone[] // Template-based layout zones
+  activeDisplays Display[]       @relation("ActiveLayout")
+  schedules      Schedule[]
+}
+
+model LayoutSection {
+  id     String @id @default(auto()) @map("_id") @db.ObjectId
+  name   String // e.g., "Section 1", "Section 2"
+  order  Int // Order of section in layout
+  x      Float  @default(0) // X position (percentage)
+  y      Float  @default(0) // Y position (percentage)
+  width  Float  @default(100) // Width (percentage)
+  height Float  @default(100) // Height (percentage)
+
+  // Playback settings
+  frequency   Int? // Times per hour
+  loopEnabled Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  layoutId String @db.ObjectId
+  layout   Layout @relation(fields: [layoutId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  items LayoutSectionItem[]
+
+  @@index([layoutId, order])
+}
+
+model LayoutSectionItem {
+  id          String       @id @default(auto()) @map("_id") @db.ObjectId
+  order       Int // Order in section
+  duration    Int? // Override duration for this item (seconds)
+  orientation Orientation? // Preferred display orientation
+  resizeMode  ResizeMode?  @default(FIT) // FIT, FILL, STRETCH
+  rotation    Int?         @default(0) // 0, 90, 180, 270
+
+  createdAt DateTime @default(now())
+
+  // Relations
+  sectionId String        @db.ObjectId
+  section   LayoutSection @relation(fields: [sectionId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  mediaId String @db.ObjectId
+  media   Media  @relation(fields: [mediaId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([sectionId, order])
+}
+
+model Widget {
+  id   String     @id @default(auto()) @map("_id") @db.ObjectId
+  type WidgetType
+  name String?
+
+  // Position and size (percentage or pixels)
+  x      Float @default(0) // X position
+  y      Float @default(0) // Y position
+  width  Float @default(100) // Width
+  height Float @default(100) // Height
+
+  // Widget-specific configuration (stored as JSON)
+  config String? // JSON string for widget-specific settings
+
+  // Z-index for layering
+  zIndex Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  layoutId String @db.ObjectId
+  layout   Layout @relation(fields: [layoutId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  // Media widget can reference a media item
+  mediaId String? @db.ObjectId
+  media   Media?  @relation(fields: [mediaId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([layoutId])
+}
+
+// ============================================
+// MULTI-ZONE LAYOUT MODELS
+// ============================================
+
+model Zone {
+  id       String @id @default(auto()) @map("_id") @db.ObjectId
+  layoutId String @db.ObjectId
+  name     String // e.g., "Main Zone"
+  top      Float // Position (percentage or pixels)
+  left     Float // Position (percentage or pixels)
+  width    Float // Size (percentage or pixels)
+  height   Float // Size (percentage or pixels)
+  zIndex   Int // Z-index for layering
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  layout     Layout    @relation(fields: [layoutId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  playlistId String?   @db.ObjectId // Default content playlist for this zone
+  playlist   Playlist? @relation("ZonePlaylist", fields: [playlistId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([layoutId])
+}
+
+// ============================================
+// TEMPLATE-BASED LAYOUT MODELS
+// ============================================
+
+model LayoutZone {
+  id        String  @id @default(auto()) @map("_id") @db.ObjectId
+  layoutId  String  @db.ObjectId
+  zoneIndex Int     // Corresponds to "Section 1", "Section 2", etc.
+  name      String  // e.g., "Main Area", "Sidebar"
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  layout     Layout    @relation(fields: [layoutId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  playlistId String?   @db.ObjectId // Playlist for this zone
+  playlist   Playlist? @relation("LayoutZonePlaylist", fields: [playlistId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([layoutId, zoneIndex])
+}
+
+// ============================================
+// SCHEDULING MODELS
+// ============================================
+
+model Schedule {
+  id          String       @id @default(auto()) @map("_id") @db.ObjectId
+  name        String
+  description String?
+  isActive    Boolean      @default(true)
+  orientation Orientation? // Preferred display orientation for this schedule
+
+  // Time settings
+  startTime String // Format: "HH:MM" (e.g., "09:00")
+  endTime   String // Format: "HH:MM" (e.g., "17:00")
+  timezone  String @default("Asia/Kolkata") // Default to India timezone
+
+  // Repeat pattern
+  repeatDays String[] // Array of days: ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+  
+  // Date range (optional)
+  startDate DateTime? // When this schedule becomes active
+  endDate   DateTime? // When this schedule expires
+
+  // Priority (higher number = higher priority)
+  priority Int @default(1)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  createdById String? @db.ObjectId
+  createdBy   User?   @relation(fields: [createdById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  // What to play
+  playlistId String?   @db.ObjectId
+  playlist   Playlist? @relation(fields: [playlistId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  layoutId String? @db.ObjectId
+  layout   Layout? @relation(fields: [layoutId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  // Which displays this applies to
+  displays ScheduleDisplay[]
+
+  @@index([isActive, startTime, endTime])
+  @@index([createdById])
+}
+
+model ScheduleDisplay {
+  id         String @id @default(auto()) @map("_id") @db.ObjectId
+  scheduleId String @db.ObjectId
+  displayId  String @db.ObjectId
+
+  createdAt DateTime @default(now())
+
+  // Relations
+  schedule Schedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  display  Display  @relation(fields: [displayId], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([scheduleId, displayId])
+  @@index([scheduleId])
+  @@index([displayId])
+}

@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Media API</title>
+</head>
+<body>
+    <h1>Media API Test</h1>
+    <button onclick="testMediaAPI()">Test Media API</button>
+    <div id="result"></div>
+
+    <script>
+        async function testMediaAPI() {
+            const resultDiv = document.getElementById('result');
+            resultDiv.innerHTML = 'Testing...';
+            
+            try {
+                // Get token from localStorage or cookies
+                const token = localStorage.getItem('accessToken');
+                if (!token) {
+                    resultDiv.innerHTML = 'No access token found. Please login first.';
+                    return;
+                }
+                
+                const response = await fetch('http://localhost:5000/api/media', {
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'Content-Type': 'application/json'
+                    }
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const data = await response.json();
+                resultDiv.innerHTML = `
+                    <h3>Success!</h3>
+                    <p>Media count: ${data.media ? data.media.length : 'N/A'}</p>
+                    <p>Storage info: ${data.storageInfo ? JSON.stringify(data.storageInfo) : 'N/A'}</p>
+                    <pre>${JSON.stringify(data, null, 2)}</pre>
+                `;
+            } catch (error) {
+                resultDiv.innerHTML = `
+                    <h3>Error:</h3>
+                    <p>${error.message}</p>
+                `;
+            }
+        }
+    </script>
+</body>
+</html>
