@@ -1,0 +1,9 @@
+node_modules
+.next
+.env
+backend/.env
+backend/public/uploads
+logs
+backups
+*.zip
+*.log
