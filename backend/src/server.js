@@ -51,6 +51,9 @@ const { auditRequest, auditAuth } = require('./middleware/audit.middleware');
 
 const app = express();
 
+app.use("/uploads", express.static("public/uploads"));
+app.use("/player", express.static("public/player"));
+
 /* =========================
    SECURITY & PERFORMANCE
 ========================= */
